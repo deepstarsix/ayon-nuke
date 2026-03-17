@@ -37,7 +37,16 @@ class ExtractSlateFrame(publish.Extractor):
             "enabled": True, "template": "{intent[value]}"
         },
         "f_vfx_scope_of_work": {
-            "enabled": False, "template": ""
+            "enabled": True, "template": "{folder_description}"
+        },
+        "f_version_name": {
+            "enabled": True, "template": "{product[name]}"
+        },
+        "f_shot_name": {
+            "enabled": True, "template": "{folder[name]}"
+        },
+        "f_media_color": {
+            "enabled": True, "template": "{colorspace}"
         }
     }
 
@@ -340,40 +349,80 @@ class ExtractSlateFrame(publish.Extractor):
             "intent": intent
         })
 
+        # Add colorspace from version data
+        version_data = instance.data.get("versionData") or {}
+        fill_data["colorspace"] = version_data.get("colorspace", "")
+
+        # Add folder description from folder entity
+        folder_entity = instance.data.get("folderEntity") or {}
+        folder_attrib = folder_entity.get("attrib") or {}
+        fill_data["folder_description"] = folder_attrib.get(
+            "description", ""
+        )
+
+        # Add formatted version name (e.g. "renderCompositingMain v003")
+        product_name = fill_data.get("product", {}).get("name", "")
+        version_number = instance.data.get("version", 0)
+        fill_data["version_name"] = "{} v{:03d}".format(
+            product_name, version_number
+        )
+
+        # Process settings-driven mappings first
         for key, _values in self.key_value_mapping.items():
             if not _values["enabled"]:
                 self.log.debug("Key \"{}\" is disabled".format(key))
                 continue
 
             template = _values["template"]
-            try:
-                value = template.format(**fill_data)
+            self._set_slate_knob(node, key, template, fill_data)
 
-            except ValueError:
-                self.log.warning(
-                    "Couldn't fill template \"{}\" with data: {}".format(
-                        template, fill_data
-                    ),
-                    exc_info=True
+        # Our custom slate fields last — these always win
+        extra_fields = {
+            "f_version_name": "{version_name}",
+            "f_shot_name": "{folder[name]}",
+            "f_media_color": "{colorspace}",
+            "f_vfx_scope_of_work": "{folder_description}",
+        }
+        for key, template in extra_fields.items():
+            self._set_slate_knob(node, key, template, fill_data)
+
+    def _set_slate_knob(self, node, key, template, fill_data):
+        """Format a template and set it on a slate node knob.
+
+        Args:
+            node (nuke.Node): The slate node.
+            key (str): Knob name on the slate node.
+            template (str): Python format string.
+            fill_data (dict): Data to fill the template with.
+        """
+        try:
+            value = template.format(**fill_data)
+        except ValueError:
+            self.log.warning(
+                "Couldn't fill template \"{}\" with data: {}".format(
+                    template, fill_data
+                ),
+                exc_info=True
+            )
+            return
+        except KeyError:
+            self.log.warning(
+                (
+                    "Template contains unknown key."
+                    " Template \"{}\" Data: {}"
+                ).format(template, fill_data),
+                exc_info=True
+            )
+            return
+
+        try:
+            node[key].setValue(value)
+            self.log.debug("Change key \"{}\" to value \"{}\"".format(
+                key, value
+            ))
+        except NameError:
+            self.log.warning(
+                "Failed to set value \"{}\" on node attribute \"{}\"".format(
+                    value, key
                 )
-                continue
-
-            except KeyError:
-                self.log.warning(
-                    (
-                        "Template contains unknown key."
-                        " Template \"{}\" Data: {}"
-                    ).format(template, fill_data),
-                    exc_info=True
-                )
-                continue
-
-            try:
-                node[key].setValue(value)
-                self.log.debug("Change key \"{}\" to value \"{}\"".format(
-                    key, value
-                ))
-            except NameError:
-                self.log.warning((
-                    "Failed to set value \"{0}\" on node attribute \"{0}\""
-                ).format(value))
+            )
