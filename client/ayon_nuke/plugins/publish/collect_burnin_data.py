@@ -4,6 +4,7 @@ import glob
 import pyblish.api
 
 from ayon_core.lib import is_oiio_supported
+from ayon_core.lib.transcoding import get_oiio_info_for_input
 
 
 class CollectBurninData(pyblish.api.InstancePlugin):
@@ -32,7 +33,14 @@ class CollectBurninData(pyblish.api.InstancePlugin):
     # ------------------------------------------------------------------
 
     def _collect_exr_metadata(self, instance):
-        """Read timecode and reel name from the first rendered EXR frame."""
+        """Read timecode and reel name from the first rendered EXR frame.
+
+        Uses ``get_oiio_info_for_input`` directly instead of going through
+        ``ayon_core.plugins.loader.export_otio.get_image_info_metadata``.
+        The OTIO loader module imports Qt at module level and therefore fails
+        to import in the Nuke publish context, silently swallowing all EXR
+        metadata reads.
+        """
 
         if not is_oiio_supported():
             self.log.debug(
@@ -48,44 +56,45 @@ class CollectBurninData(pyblish.api.InstancePlugin):
             )
             return
 
+        self.log.debug("Reading EXR metadata from: {}".format(exr_path))
+
         try:
-            from ayon_core.plugins.loader.export_otio import (
-                get_image_info_metadata,
-            )
-
-            self.log.debug(
-                "Reading EXR metadata from: {}".format(exr_path)
-            )
-            metadata = get_image_info_metadata(exr_path, logger=self.log)
-
-            if not isinstance(metadata, dict):
-                self.log.debug(
-                    "get_image_info_metadata returned non-dict "
-                    "({}); skipping.".format(type(metadata).__name__)
-                )
-                return
-
-            self.log.debug(
-                "EXR metadata keys found: {}".format(list(metadata.keys()))
-            )
-
-            burnin_members = instance.data.setdefault(
-                "burninDataMembers", {}
-            )
-
-            self._inject_burnin_member(
-                burnin_members, metadata, "timecode", "exr_timecode"
-            )
-            self._inject_burnin_member(
-                burnin_members, metadata, "reelname", "exr_tape_id"
-            )
-
+            info = get_oiio_info_for_input(exr_path, logger=self.log)
         except Exception as exc:
             self.log.warning(
-                "Could not read EXR metadata from '{}': {}".format(
-                    exr_path, exc
-                )
+                "oiiotool failed to read '{}': {}".format(exr_path, exc)
             )
+            return
+
+        # Flatten all attribs into a single dict, normalising keys to
+        # lowercase and stripping the "smpte:" prefix that oiiotool adds to
+        # SMPTE-standard metadata (e.g. "smpte:TimeCode" → "timecode").
+        attribs = (info or {}).get("attribs") or {}
+        metadata = {}
+        for key, value in attribs.items():
+            normalised = key
+            if normalised.lower().startswith("smpte:"):
+                normalised = normalised[normalised.lower().index(":") + 1:]
+            metadata[normalised.lower()] = value
+
+        self.log.debug(
+            "EXR metadata keys found: {}".format(sorted(metadata.keys()))
+        )
+
+        if not metadata:
+            self.log.debug(
+                "No metadata returned from EXR; "
+                "exr_timecode and exr_tape_id will not be set."
+            )
+            return
+
+        burnin_members = instance.data.setdefault("burninDataMembers", {})
+        self._inject_burnin_member(
+            burnin_members, metadata, "timecode", "exr_timecode"
+        )
+        self._inject_burnin_member(
+            burnin_members, metadata, "reelname", "exr_tape_id"
+        )
 
     def _inject_burnin_member(self, burnin_members, metadata, src_key, dst_key):
         """Inject a single metadata value into burnin members.
@@ -95,7 +104,7 @@ class CollectBurninData(pyblish.api.InstancePlugin):
 
         Args:
             burnin_members (dict): The ``burninDataMembers`` dict to update.
-            metadata (dict): Metadata returned by ``get_image_info_metadata``.
+            metadata (dict): Flattened attribs from ``get_oiio_info_for_input``.
             src_key (str): Key to look up in *metadata*.
             dst_key (str): Key to set in *burnin_members*.
         """
