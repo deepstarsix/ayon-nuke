@@ -89,34 +89,62 @@ class CollectBurninData(pyblish.api.InstancePlugin):
             return
 
         burnin_members = instance.data.setdefault("burninDataMembers", {})
-        self._inject_burnin_member(
-            burnin_members, metadata, "timecode", "exr_timecode"
+
+        # ---- timecode -------------------------------------------------------
+        # Store the raw SMPTE string as "exr_timecode" (static display).
+        # Also set "frame_start_tc" so that the "{timecode}" placeholder in
+        # burnin templates is driven by the EXR start timecode and
+        # auto-increments per frame via ffmpeg's drawtext timecode filter
+        # (see ayon_core/scripts/otio_burnin.py – frame_start_tc is read from
+        # the burnin data dict and passed to ModifiedBurnins.add_timecode).
+        tc_value = self._first_metadata_value(
+            metadata, ["timecode"]
         )
-        self._inject_burnin_member(
-            burnin_members, metadata, "reelname", "exr_tape_id"
-        )
-
-    def _inject_burnin_member(self, burnin_members, metadata, src_key, dst_key):
-        """Inject a single metadata value into burnin members.
-
-        Uses ``setdefault`` so any value already present in *burnin_members*
-        is preserved.
-
-        Args:
-            burnin_members (dict): The ``burninDataMembers`` dict to update.
-            metadata (dict): Flattened attribs from ``get_oiio_info_for_input``.
-            src_key (str): Key to look up in *metadata*.
-            dst_key (str): Key to set in *burnin_members*.
-        """
-        value = metadata.get(src_key, "")
-        if value:
-            burnin_members.setdefault(dst_key, value)
-            self.log.debug("Injected {}: {}".format(dst_key, value))
+        if tc_value:
+            burnin_members.setdefault("exr_timecode", tc_value)
+            burnin_members.setdefault("frame_start_tc", tc_value)
+            self.log.debug(
+                "Injected exr_timecode / frame_start_tc: {}".format(tc_value)
+            )
         else:
             self.log.debug(
-                "No '{}' key in EXR metadata; "
-                "{} will not be set.".format(src_key, dst_key)
+                "No timecode key in EXR metadata; "
+                "exr_timecode and frame_start_tc will not be set."
             )
+
+        # ---- reel / tape name -----------------------------------------------
+        # OpenEXR spec uses "reelName" which normalises to "reelname".
+        # Some tools (e.g. certain Nuke versions or camera-vendor software)
+        # write it as "reel" (shorter) or "tapeName" → "tapename".
+        # Try all known variants in precedence order.
+        reel_value = self._first_metadata_value(
+            metadata, ["reelname", "reel", "tapename"]
+        )
+        if reel_value:
+            burnin_members.setdefault("exr_tape_id", reel_value)
+            self.log.debug("Injected exr_tape_id: {}".format(reel_value))
+        else:
+            self.log.debug(
+                "No reel/tape name key (reelname/reel/tapename) found in "
+                "EXR metadata; exr_tape_id will not be set."
+            )
+
+    def _first_metadata_value(self, metadata, candidate_keys):
+        """Return the first non-empty value found in *metadata* by trying
+        *candidate_keys* in order.
+
+        Args:
+            metadata (dict): Normalised (lowercase) attribs dict.
+            candidate_keys (list[str]): Keys to try in precedence order.
+
+        Returns:
+            Any | None: The first truthy value found, or ``None``.
+        """
+        for key in candidate_keys:
+            value = metadata.get(key)
+            if value:
+                return value
+        return None
 
     def _resolve_first_exr(self, instance):
         """Return the path to the first non-slate EXR frame for this instance.
