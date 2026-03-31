@@ -53,28 +53,32 @@ class CollectBurninData(pyblish.api.InstancePlugin):
                 get_image_info_metadata,
             )
 
-            metadata = get_image_info_metadata(exr_path)
+            self.log.debug(
+                "Reading EXR metadata from: {}".format(exr_path)
+            )
+            metadata = get_image_info_metadata(exr_path, logger=self.log)
+
+            if not isinstance(metadata, dict):
+                self.log.debug(
+                    "get_image_info_metadata returned non-dict "
+                    "({}); skipping.".format(type(metadata).__name__)
+                )
+                return
+
+            self.log.debug(
+                "EXR metadata keys found: {}".format(list(metadata.keys()))
+            )
 
             burnin_members = instance.data.setdefault(
                 "burninDataMembers", {}
             )
 
-            timecode = metadata.get("timecode", "")
-            if timecode:
-                # Use setdefault so a value already present (e.g. set by
-                # another collector) is not overwritten.
-                burnin_members.setdefault("exr_timecode", timecode)
-                self.log.debug(
-                    "Injected exr_timecode: {}".format(timecode)
-                )
-
-            reel = metadata.get("reelname", "")
-            if reel:
-                # Use setdefault so a value already present is not overwritten.
-                burnin_members.setdefault("exr_tape_id", reel)
-                self.log.debug(
-                    "Injected exr_tape_id: {}".format(reel)
-                )
+            self._inject_burnin_member(
+                burnin_members, metadata, "timecode", "exr_timecode"
+            )
+            self._inject_burnin_member(
+                burnin_members, metadata, "reelname", "exr_tape_id"
+            )
 
         except Exception as exc:
             self.log.warning(
@@ -83,23 +87,66 @@ class CollectBurninData(pyblish.api.InstancePlugin):
                 )
             )
 
-    def _resolve_first_exr(self, instance):
-        """Return the path to the first EXR frame for this instance.
+    def _inject_burnin_member(self, burnin_members, metadata, src_key, dst_key):
+        """Inject a single metadata value into burnin members.
 
-        Tries to construct the path from ``instance.data["path"]`` and
-        ``instance.data["frameStartHandle"]`` / ``instance.data["frameStart"]``
-        first, then falls back to a glob over ``outputDir``.
+        Uses ``setdefault`` so any value already present in *burnin_members*
+        is preserved.
+
+        Args:
+            burnin_members (dict): The ``burninDataMembers`` dict to update.
+            metadata (dict): Metadata returned by ``get_image_info_metadata``.
+            src_key (str): Key to look up in *metadata*.
+            dst_key (str): Key to set in *burnin_members*.
+        """
+        value = metadata.get(src_key, "")
+        if value:
+            burnin_members.setdefault(dst_key, value)
+            self.log.debug("Injected {}: {}".format(dst_key, value))
+        else:
+            self.log.debug(
+                "No '{}' key in EXR metadata; "
+                "{} will not be set.".format(src_key, dst_key)
+            )
+
+    def _resolve_first_exr(self, instance):
+        """Return the path to the first non-slate EXR frame for this instance.
+
+        When a slate is present the slate EXR is rendered at
+        ``frameStartHandle - 1``.  That frame does not carry the real shot
+        timecode/reel metadata, so we always skip it.
+
+        Strategy (in order):
+        1. Evaluate ``instance.data["path"] % frameStartHandle`` directly and
+           return it if the file already exists on disk.
+        2. Glob ``outputDir`` for ``*.exr``, skip the slate frame file, and
+           return the first remaining match.
         """
 
         output_dir = instance.data.get("outputDir", "")
-
-        # Try to evaluate the write node path for the first frame
         file_path = instance.data.get("path", "")
         first_frame = (
             instance.data.get("frameStartHandle")
             or instance.data.get("frameStart")
         )
 
+        # Build the slate frame basename so we can filter it out in the glob
+        # fallback.  The slate is always rendered one frame before the first
+        # handle frame, regardless of whether the "slate" family is present.
+        slate_basename = None
+        if file_path and first_frame is not None:
+            try:
+                slate_path = file_path % (int(first_frame) - 1)
+                slate_basename = os.path.basename(slate_path)
+            except (TypeError, ValueError):
+                self.log.debug(
+                    "Could not compute slate frame path from '{}' and "
+                    "first_frame '{}'; slate filtering disabled.".format(
+                        file_path, first_frame
+                    )
+                )
+
+        # Primary: resolve the exact path for the first handle frame.
         if file_path and first_frame is not None:
             try:
                 # file_path uses printf-style frame padding (e.g. %04d)
@@ -109,12 +156,18 @@ class CollectBurninData(pyblish.api.InstancePlugin):
             except (TypeError, ValueError):
                 pass
 
-        # Fall back: find the first .exr in outputDir
+        # Fallback: glob outputDir and skip the slate frame.
         if output_dir and os.path.isdir(output_dir):
             pattern = os.path.join(output_dir, "*.exr")
-            matches = sorted(glob.glob(pattern))
-            if matches:
-                return matches[0]
+            for match in sorted(glob.glob(pattern)):
+                if slate_basename and (
+                    os.path.basename(match) == slate_basename
+                ):
+                    self.log.debug(
+                        "Skipping slate frame in glob: {}".format(match)
+                    )
+                    continue
+                return match
 
         return None
 
