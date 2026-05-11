@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import re
 import json
@@ -1402,6 +1403,56 @@ def color_gui_to_int(color_gui):
     return int(hex_value, 16)
 
 
+def get_backdrop_nodes(backdrop_node):
+    """Return all nodes contained within a backdrop node.
+
+    In GUI mode uses the native ``BackdropNode.getNodes()`` method.
+    In headless/terminal mode that method is unavailable, so we fall back
+    to a manual positional check: any node whose top-left corner (xpos, ypos)
+    falls inside the backdrop's bounding rectangle is considered a member.
+
+    Args:
+        backdrop_node (nuke.BackdropNode): The backdrop node to query.
+
+    Returns:
+        list[nuke.Node]: Nodes contained within the backdrop.
+    """
+    if nuke.GUI:
+        return backdrop_node.getNodes()
+
+    # Headless fallback: find nodes whose position falls inside the backdrop.
+    # Note: this may include nodes that are inside only partially (by their top
+    # left corner) instead of the full node because `node.screenWidth()` and
+    # `node.screenHeight()` always return 0 in terminal mode.
+    x_min = backdrop_node.xpos()
+    y_min = backdrop_node.ypos()
+    x_max = x_min + backdrop_node["bdwidth"].value()
+    y_max = y_min + backdrop_node["bdheight"].value()
+    contained = []
+    for node in nuke.allNodes(
+        group=backdrop_node.parent(),
+        recurseGroups=False
+    ):
+        if node is backdrop_node:
+            continue
+
+        # Skip if out of bounds
+        node_x_min = node.xpos()
+        if node_x_min < x_min:
+            continue
+        node_y_min = node.ypos()
+        if node_y_min < y_min:
+            continue
+        node_x_max = node_x_min + node.screenWidth()
+        if node_x_max > x_max:
+            continue
+        node_y_max = node_y_min + node.screenHeight()
+        if node_y_max > y_max:
+            continue
+        contained.append(node)
+    return contained
+
+
 def create_backdrop(label="", color=None, layer=0,
                     nodes=None):
     """
@@ -1739,8 +1790,6 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
 
         Path set into nuke workfile. It is trying to replace path with
         environment variable if possible. If not, it will set it as it is.
-        It also saves the script to apply the change, but only if it's not
-        empty Untitled script.
 
         Args:
             config_data (dict): OCIO config data from settings
@@ -1748,19 +1797,11 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
         """
         # replace path with env var if possible
         ocio_path = self._replace_ocio_path_with_env_var(config_data)
+        log.info("Setting OCIO config path to: %s", ocio_path)
 
-        log.info("Setting OCIO config path to: `{}`".format(
-            ocio_path))
-
-        self._root_node["customOCIOConfigPath"].setValue(
-            ocio_path
-        )
-        self._root_node["OCIO_config"].setValue("custom")
-
-        # only save script if it's not empty
-        if self._root_node["name"].value() != "":
-            log.info("Saving script to apply OCIO config path change.")
-            nuke.scriptSave()
+        root = self._root_node
+        root["customOCIOConfigPath"].setValue(ocio_path)
+        root["OCIO_config"].setValue("custom")
 
     def _get_included_vars(self, config_template):
         """Get all environment variables included in template
@@ -1798,7 +1839,7 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
         formatted values.
 
         Args:
-            config_data (str): OCIO config dict from settings
+            config_data (dict[str, str]): OCIO config dict from settings
 
         Returns:
             str: OCIO config path with environment variable TCL expression
@@ -1941,52 +1982,55 @@ Reopening Nuke should synchronize these paths and resolve any discrepancies.
             set_node_knobs_from_settings(write_node, colorspace_knobs)
 
     # TODO: move into ./colorspace.py
-    def set_reads_colorspace(self, read_clrs_inputs):
+    def set_reads_colorspace(self, read_clrs_inputs: list[dict[str, str]]):
         """Setting colorspace to Read nodes
 
         Looping through all read nodes and tries to set colorspace based
         on regex rules in presets
         """
         changes = {}
-        for n in nuke.allNodes():
-            file = nuke.filename(n)
-            if n.Class() != "Read":
+        for node in nuke.allNodes("Read"):
+            file = nuke.filename(node)
+            # Read node may return `None` if never set to any value
+            if file is None:
                 continue
 
             # check if any colorspace presets for read is matching
-            preset_clrsp = None
+            preset_colorspace = None
 
-            for input in read_clrs_inputs:
-                if not bool(re.search(input["regex"], file)):
+            for input_ in read_clrs_inputs:
+                if not bool(re.search(input_["regex"], file)):
                     continue
-                preset_clrsp = input["colorspace"]
+                preset_colorspace = input_["colorspace"]
 
-            if preset_clrsp is not None:
-                current = n["colorspace"].value()
-                future = str(preset_clrsp)
+            if preset_colorspace is not None:
+                current = node["colorspace"].value()
+                future = str(preset_colorspace)
                 if current != future:
-                    changes[n.name()] = {
+                    changes[node.name()] = {
                         "from": current,
                         "to": future
                     }
 
         if changes:
             msg = "Read nodes are not set to correct colorspace:\n\n"
-            for nname, knobs in changes.items():
+            for node_name, knobs in changes.items():
                 msg += (
                     " - node: '{0}' is now '{1}' but should be '{2}'\n"
-                ).format(nname, knobs["from"], knobs["to"])
+                ).format(node_name, knobs["from"], knobs["to"])
 
             msg += "\nWould you like to change it?"
 
             if nuke.ask(msg):
-                for nname, knobs in changes.items():
-                    n = nuke.toNode(nname)
-                    n["colorspace"].setValue(knobs["to"])
+                for node_name, knobs in changes.items():
+                    node = nuke.toNode(node_name)
+                    node["colorspace"].setValue(knobs["to"])
                     log.info(
                         "Setting `{0}` to `{1}`".format(
-                            nname,
-                            knobs["to"]))
+                            node_name,
+                            knobs["to"]
+                        )
+                    )
 
     # TODO: move into ./colorspace.py
     def set_colorspace(self):
@@ -2765,6 +2809,12 @@ def get_group_io_nodes(nodes):
 
     if not nodes:
         raise ValueError("there is no nodes in the list")
+
+    nodes = [
+        node for node in nodes
+        # Avoid non-connectable nodes, like Backdrops
+        if node.maxInputs() > 0 or node.maxOutputs() > 0
+    ]
 
     input_node = None
     output_node = None
