@@ -12,7 +12,6 @@ class ExtractReviewIntermediates(publish.Extractor):
     """Extracting intermediate videos or sequences with
     thumbnail for transcoding.
 
-    must be run after extract_render_local.py
 
     """
 
