@@ -18,6 +18,21 @@ class LoadEffects(plugin.NukeGroupLoader):
     icon = "cc"
     color = "white"
 
+    # Loaded from settings: ayon+settings://nuke/load/LoadEffects
+    enable_resolution_wrap = True
+    default_editorial_resolution_width = 1920
+    default_editorial_resolution_height = 1080
+    spatial_effect_classes = [
+        "Transform",
+        "Crop",
+        "CornerPin",
+        "GridWarp",
+        "Text",
+        "Roto",
+        "SplineWarp",
+        "AdjustBBox",
+    ]
+
     def on_load(self, group_node, namespace, context):
         assign_to = self._load_effects_to_group(context, group_node=group_node)
         self.connect_read_node(group_node, namespace, assign_to)
@@ -72,6 +87,20 @@ class LoadEffects(plugin.NukeGroupLoader):
 
         # get correct order of nodes by positions on track and subtrack
         nodes_order = self._reorder_nodes(json_f)
+        editorial_resolution = self._get_editorial_resolution(context, json_f)
+        wrap_resolution = (
+            self.enable_resolution_wrap
+            and self._needs_resolution_wrap(nodes_order)
+            and not self._resolution_matches_root(editorial_resolution)
+        )
+
+        if wrap_resolution:
+            self.log.info(
+                "Wrapping spatial effects with Reformat nodes: "
+                "plate/root -> {width}x{height} -> effects -> root.format".format(
+                    **editorial_resolution
+                )
+            )
 
         # adding content to the group node
         nuke.endGroup()  # jump out of group if we happen to be in one
@@ -79,16 +108,124 @@ class LoadEffects(plugin.NukeGroupLoader):
             # first remove all nodes if any in the group
             for node in group_node.nodes():
                 nuke.delete(node)
-            self._create_nodes_order(nodes_order)
+            self._create_nodes_order(
+                nodes_order,
+                editorial_resolution=editorial_resolution,
+                wrap_resolution=wrap_resolution,
+            )
 
         return json_f["assignTo"]
 
-    def _create_nodes_order(self, nodes_order: dict):
+    def _get_editorial_resolution(self, context: dict, json_f: dict) -> dict:
+        version_attrs = context.get("version", {}).get("attrib", {})
+        width = (
+            version_attrs.get("editorialResolutionWidth")
+            or json_f.get("editorialResolutionWidth")
+            or self.default_editorial_resolution_width
+        )
+        height = (
+            version_attrs.get("editorialResolutionHeight")
+            or json_f.get("editorialResolutionHeight")
+            or self.default_editorial_resolution_height
+        )
+        pixel_aspect = (
+            version_attrs.get("editorialPixelAspect")
+            or json_f.get("editorialPixelAspect")
+            or 1.0
+        )
+        return {
+            "width": int(width),
+            "height": int(height),
+            "pixel_aspect": float(pixel_aspect),
+        }
+
+    def _needs_resolution_wrap(self, nodes_order: dict) -> bool:
+        spatial_classes = set(self.spatial_effect_classes)
+        for effect_data in nodes_order.values():
+            effect_class = effect_data.get("class", "")
+            for spatial_class in spatial_classes:
+                if spatial_class in effect_class:
+                    return True
+        return False
+
+    def _resolution_matches_root(self, editorial_resolution: dict) -> bool:
+        root_format = nuke.root().format()
+        return (
+            root_format.width() == editorial_resolution["width"]
+            and root_format.height() == editorial_resolution["height"]
+        )
+
+    def _ensure_nuke_format(
+            self, width: int, height: int, pixel_aspect: float) -> str:
+        format_name = "ayon_editorial_{width}x{height}".format(
+            width=width, height=height
+        )
+        for existing_format in nuke.formats():
+            if existing_format.name() == format_name:
+                return format_name
+
+        format_string = "{width} {height} {pixel_aspect:.2f} {name}".format(
+            width=width,
+            height=height,
+            pixel_aspect=pixel_aspect,
+            name=format_name,
+        )
+        nuke.addFormat(format_string)
+        return format_name
+
+    def _set_preserve_bbox(self, reformat: nuke.Node) -> None:
+        """Enable preserve bounding box on a Reformat node.
+
+        The UI label is "preserve bounding box"; the script knob is ``pbb``
+        in most Nuke versions (``preserve_bbox`` in some docs/builds).
+        """
+        for knob_name in ("pbb", "preserve_bbox"):
+            if knob_name in reformat.knobs():
+                reformat[knob_name].setValue(True)
+                return
+        self.log.warning(
+            "Reformat node has no preserve-bbox knob; skipping."
+        )
+
+    def _create_reformat_to_editorial(
+            self, editorial_resolution: dict) -> nuke.Node:
+        format_name = self._ensure_nuke_format(
+            editorial_resolution["width"],
+            editorial_resolution["height"],
+            editorial_resolution["pixel_aspect"],
+        )
+        reformat = nuke.createNode("Reformat", "name Reformat_to_editorial")
+        reformat["type"].setValue("format")
+        reformat["format"].setValue(format_name)
+        reformat["resize"].setValue("width")
+        reformat["center"].setValue(True)
+        self._set_preserve_bbox(reformat)
+        return reformat
+
+    def _create_reformat_to_root(self) -> nuke.Node:
+        reformat = nuke.createNode("Reformat", "name Reformat_to_root")
+        reformat["type"].setValue("format")
+        reformat["format"].setValue(nuke.root()["format"].value())
+        self._set_preserve_bbox(reformat)
+        return reformat
+
+    def _create_nodes_order(
+            self,
+            nodes_order: dict,
+            editorial_resolution=None,
+            wrap_resolution=False):
         workfile_first_frame = int(nuke.root()["first_frame"].getValue())
 
         # create input node
         pre_node = nuke.createNode("Input")
         pre_node["name"].setValue("rgb")
+
+        if wrap_resolution and editorial_resolution:
+            reformat_in = self._create_reformat_to_editorial(
+                editorial_resolution
+            )
+            reformat_in.setInput(0, pre_node)
+            pre_node = reformat_in
 
         for ef_val in nodes_order.values():
             node = nuke.createNode(ef_val["class"])
@@ -122,6 +259,11 @@ class LoadEffects(plugin.NukeGroupLoader):
             node.setInput(0, pre_node)
             pre_node = node
 
+        if wrap_resolution and editorial_resolution:
+            reformat_out = self._create_reformat_to_root()
+            reformat_out.setInput(0, pre_node)
+            pre_node = reformat_out
+
         # create output node
         output = nuke.createNode("Output")
         output.setInput(0, pre_node)
@@ -129,16 +271,21 @@ class LoadEffects(plugin.NukeGroupLoader):
         return pre_node
 
     def _reorder_nodes(self, data: dict) -> dict:
-        track_nums = [
-            v["trackIndex"] for v in data.values() if isinstance(v, dict)]
-        sub_track_nums = [
-            v["subTrackIndex"] for v in data.values() if isinstance(v, dict)]
+        effect_items = {
+            key: value for key, value in data.items()
+            if isinstance(value, dict) and "trackIndex" in value
+        }
+        if not effect_items:
+            return {}
+
+        track_nums = [v["trackIndex"] for v in effect_items.values()]
+        sub_track_nums = [v["subTrackIndex"] for v in effect_items.values()]
 
         new_order = {}
         for track_index in range(min(track_nums), max(track_nums) + 1):
             for sub_track_index in range(
                     min(sub_track_nums), max(sub_track_nums) + 1):
-                item = self._get_item(data, track_index, sub_track_index)
+                item = self._get_item(effect_items, track_index, sub_track_index)
                 if item:
                     new_order.update(item)
         return new_order
