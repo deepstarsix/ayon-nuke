@@ -133,9 +133,11 @@ def _submit_render_on_farm(node) -> bool:
     # Used in pyblish plugins to determine whether to run or not.
     context.data["render_on_farm"] = True
 
-    # Since we need to bypass version validation and incrementing, we need to
-    # remove the plugins from the list that are responsible for these tasks.
-    plugins = pyblish.api.discover()
+    # Use CreateContext's discovered plugins (same as Publisher), not raw
+    # pyblish.api.discover(). Raw discover execs plugin files without
+    # registering them in sys.modules, which breaks dataclasses in
+    # collect_addons.py (core 1.9.9+) and silently drops CollectAddons.
+    plugins = list(create_context.publish_plugins)
     blacklist = ["IncrementScriptVersion", "ValidateVersion"]
     plugins = [
         plugin
