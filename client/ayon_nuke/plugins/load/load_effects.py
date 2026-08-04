@@ -35,13 +35,24 @@ class LoadEffects(plugin.NukeGroupLoader):
         "AdjustBBox",
     ]
 
+    def load(self, context, name=None, namespace=None, options=None):
+        # Stash options for on_load (NukeGroupLoader does not pass them).
+        self._load_options = options or {}
+        return super().load(context, name=name, namespace=namespace, options=options)
+
     def on_load(self, group_node, namespace, context):
         assign_to = self._load_effects_to_group(context, group_node=group_node)
-        self.connect_read_node(group_node, namespace, assign_to)
+        # Template placeholders wire the group via _set_loaded_connections.
+        # Only auto-insert after the plate Read when explicitly requested
+        # (default for Loader tool / manual loads).
+        options = getattr(self, "_load_options", {}) or {}
+        if options.get("connect_to_read", True):
+            self.connect_read_node(group_node, namespace, assign_to)
 
     def on_update(self, group_node, namespace, context):
-        # Do the exact same os on load
-        self.on_load(group_node, namespace, context)
+        # Refresh group contents only — keep existing graph connections
+        # (important for template-placed effects mid-chain).
+        self._load_effects_to_group(context, group_node=group_node)
         return group_node
 
     def connect_read_node(self, group_node, namespace, product_name):

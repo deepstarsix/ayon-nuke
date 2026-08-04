@@ -75,11 +75,27 @@ class NukePlaceholderLoadPlugin(NukePlaceholderPlugin, PlaceholderLoadMixin):
         placeholder.data["last_repre_id"] = representation["id"]
 
     def populate_placeholder(self, placeholder):
-        self.populate_load_placeholder(placeholder)
+        self._populate_with_template_loader_args(placeholder)
 
     def repopulate_placeholder(self, placeholder):
         repre_ids = self._get_loaded_repre_ids()
-        self.populate_load_placeholder(placeholder, repre_ids)
+        self._populate_with_template_loader_args(placeholder, repre_ids)
+
+    def _populate_with_template_loader_args(
+            self, placeholder, ignore_repre_ids=None):
+        """Populate load placeholder with template-aware loader options.
+
+        Workfile placeholders own graph wiring via post_placeholder_process.
+        Tell loaders like LoadEffects not to auto-connect to the plate Read.
+        """
+        original_args = placeholder.data.get("loader_args")
+        try:
+            loader_args = self.parse_loader_args(original_args)
+            loader_args["connect_to_read"] = False
+            placeholder.data["loader_args"] = repr(loader_args)
+            self.populate_load_placeholder(placeholder, ignore_repre_ids)
+        finally:
+            placeholder.data["loader_args"] = original_args
 
     def get_placeholder_options(self, options=None):
         return self.get_load_plugin_options(options)
