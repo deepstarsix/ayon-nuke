@@ -19,7 +19,9 @@ class LoadEffects(plugin.NukeGroupLoader):
     color = "white"
 
     # Loaded from settings: ayon+settings://nuke/load/LoadEffects
-    enable_resolution_wrap = True
+    # Resolution wrap (Reformat sandwich) is only for Input Process —
+    # nodes loader inserts into the plate graph at root format.
+    enable_resolution_wrap = False
     default_editorial_resolution_width = 1920
     default_editorial_resolution_height = 1080
     spatial_effect_classes = [
@@ -305,6 +307,10 @@ class LoadEffectsInputProcess(LoadEffects):
     label = "Load Effects - Input Process"
     icon = "eye"
     color = "#cc0000"
+
+    # Viewer Input Process runs against the full plate/root format, so
+    # spatial effects authored in editorial res need the Reformat wrap.
+    enable_resolution_wrap = True
 
     def on_load(self, group_node, namespace, context):
         # try to place it under Viewer1
