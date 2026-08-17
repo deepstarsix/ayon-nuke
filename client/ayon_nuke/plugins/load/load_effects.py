@@ -212,6 +212,7 @@ class LoadEffects(plugin.NukeGroupLoader):
         reformat["format"].setValue(format_name)
         reformat["resize"].setValue("width")
         reformat["center"].setValue(True)
+        reformat["black_outside"].setValue(False)
         self._set_preserve_bbox(reformat)
         return reformat
 
@@ -219,6 +220,7 @@ class LoadEffects(plugin.NukeGroupLoader):
         reformat = nuke.createNode("Reformat", "name Reformat_to_root")
         reformat["type"].setValue("format")
         reformat["format"].setValue(nuke.root()["format"].value())
+        reformat["black_outside"].setValue(False)
         self._set_preserve_bbox(reformat)
         return reformat
 
