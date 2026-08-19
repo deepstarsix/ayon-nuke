@@ -134,6 +134,7 @@ class Context:
     # Workfile related code
     workfiles_launched = False
     workfiles_tool_timer = None
+    workfile_template_builder_started = False
 
     # Seems unused
     _project_entity = None
@@ -2740,10 +2741,15 @@ def start_workfile_template_builder():
         build_workfile_template
     )
 
-    # remove callback since it would be duplicating the workfile
-    nuke.removeOnCreate(start_workfile_template_builder, nodeClass="Root")
+    # The Root 'onCreate' callback stays registered for the whole session so
+    # that context settings keep being applied. The builder itself must run
+    # only once: opening a workfile in-session clears the script first, which
+    # creates a new Root and would build the template into the empty script
+    # right before the saved workfile is read on top of it.
+    if Context.workfile_template_builder_started:
+        return
+    Context.workfile_template_builder_started = True
 
-    # to avoid looping of the callback, remove it!
     log.info("Starting workfile template builder...")
     try:
         build_workfile_template(workfile_creation_enabled=True)
