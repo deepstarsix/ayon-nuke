@@ -51,11 +51,6 @@ class ExtractSlateFrame(publish.Extractor):
     }
 
     def process(self, instance):
-        # Farm instances are rendered on the farm and slate generation
-        # will be handled server-side; skip local extraction.
-        if instance.data.get("farm"):
-            return
-
         slate_node = instance.data.get("slateNode")
         if not slate_node:
             return
@@ -84,7 +79,9 @@ class ExtractSlateFrame(publish.Extractor):
                 # backward compatibility
                 self.render_slate(instance)
 
-            # also render image to sequence
+            # Deadline farm jobs render frameStartHandle..frameEndHandle and
+            # never include the slate frame (start-1). Write that EXR here
+            # at submit time so farm publish finds it next to the sequence.
             self._render_slate_to_sequence(instance)
 
     def _create_staging_dir(self, instance):
