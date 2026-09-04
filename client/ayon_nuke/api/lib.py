@@ -15,9 +15,7 @@ from qtpy import QtCore, QtWidgets
 import ayon_api
 
 from ayon_core.host import HostDirmap
-from ayon_core.pipeline.workfile.workfile_template_builder import (
-    TemplateProfileNotFound
-)
+
 from ayon_core.lib import (
     env_value_to_bool,
     Logger,
@@ -134,7 +132,6 @@ class Context:
     # Workfile related code
     workfiles_launched = False
     workfiles_tool_timer = None
-    workfile_template_builder_started = False
 
     # Seems unused
     _project_entity = None
@@ -999,6 +996,24 @@ def script_name() -> str:
     return nuke.root().knob("name").value()
 
 
+def add_button_render_single_image(node: nuke.Node) -> None:
+    """Add a button to render a single image for the given node.
+
+    Args:
+        node (nuke.Node): The node for which the render single image
+        button is being added.
+    """
+    name = "Render"
+    label = "Render Local"
+    value = (
+        "from ayon_nuke.api.utils import render_single_frame;"
+        "render_single_frame(nuke.thisNode())"
+    )
+    knob = nuke.PyScript_Knob(name, label, value)
+    knob.clearFlag(nuke.STARTLINE)
+    node.addKnob(knob)
+
+
 def add_button_render_on_farm(node):
     name = "renderOnFarm"
     label = "Render On Farm"
@@ -1281,6 +1296,10 @@ def create_write_node(
             if "___" in _k_name:
                 # add divider
                 GN.addKnob(nuke.Text_Knob(""))
+
+            elif  _k_name == "Render" and plugin_name == "CreateWriteImage":
+                add_button_render_single_image(GN)
+
             else:
                 # add linked knob by _k_name
                 link = nuke.Link_Knob("")
@@ -2494,9 +2513,13 @@ def maintained_selection(exclude_nodes=None):
         # unselect all selection in case there is some
         reset_selection()
 
-        # and select all previously selected nodes
-        if previous_selection:
-            select_nodes(previous_selection)
+        for node in previous_selection:
+            try:
+                node["selected"].setValue(True)
+            except ValueError:
+                # Could fail if a node was deleted during the context.
+                # See: https://github.com/ynput/ayon-nuke/pull/331 for details.
+                pass
 
 
 @contextlib.contextmanager
@@ -2734,27 +2757,6 @@ def prompt_reset_context():
             update_content_on_context_change()
     finally:
         dialog.deleteLater()
-
-
-def start_workfile_template_builder():
-    from .workfile_template_builder import (
-        build_workfile_template
-    )
-
-    # The Root 'onCreate' callback stays registered for the whole session so
-    # that context settings keep being applied. The builder itself must run
-    # only once: opening a workfile in-session clears the script first, which
-    # creates a new Root and would build the template into the empty script
-    # right before the saved workfile is read on top of it.
-    if Context.workfile_template_builder_started:
-        return
-    Context.workfile_template_builder_started = True
-
-    log.info("Starting workfile template builder...")
-    try:
-        build_workfile_template(workfile_creation_enabled=True)
-    except TemplateProfileNotFound:
-        log.warning("Template profile not found. Skipping...")
 
 
 def add_scripts_menu():
